@@ -22,14 +22,21 @@
     $('.workspace').dataset.view = view;
     $$('.mobile-nav button').forEach(b => {b.classList.toggle('active', b.dataset.view === view); b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false');});
   }
+  function updateHistory(state, hash, replace = false) {
+    // file:// browsers may reject URL changes through the History API.
+    if (location.protocol === 'file:') {
+      if (replace) location.replace(hash); else location.hash = hash;
+      history.replaceState(state, '');
+    } else history[replace ? 'replaceState' : 'pushState'](state, '', hash);
+  }
   function savePosition() {
-    history.replaceState({...history.state, dyIndex: historyIndex, scroll: $('#code').scrollTop, left: $('#code').scrollLeft}, '', location.href);
+    history.replaceState({...history.state, dyIndex: historyIndex, scroll: $('#code').scrollTop, left: $('#code').scrollLeft}, '');
   }
   function navigate(hash) {
     savePosition();
     if (hash !== location.hash) {
       historyIndex++; historyMax = historyIndex;
-      history.pushState({dyIndex: historyIndex}, '', hash);
+      updateHistory({dyIndex: historyIndex}, hash);
     }
     renderRoute(false);
   }
@@ -244,6 +251,6 @@
   });
   $('#file-count').textContent = D.meta.files;
   $('#repo-info').textContent = `${D.meta.symbols.toLocaleString()} symbols · ${D.meta.references.toLocaleString()} references · ${D.meta.revision || 'working tree'}`;
-  if (!location.hash) history.replaceState({dyIndex: 0}, '', href('DY/Trace/Basic.lean'));
+  if (!location.hash) updateHistory({dyIndex: 0}, href('DY/Trace/Basic.lean'), true);
   renderRoute(true);
 })();

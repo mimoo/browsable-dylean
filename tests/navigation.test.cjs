@@ -94,3 +94,22 @@ test('recursive declarations terminate hierarchy cycles', async () => {
   assert.ok(cycle); assert.equal(cycle.disabled, true); assert.equal(cycle.textContent, '↻');
   await wait();
 });
+
+test('standalone file:// export supports definition jumps and Back', async () => {
+  const offline = new JSDOM(fs.readFileSync(path.join(root, 'dist/index.html'), 'utf8'), {url:'file:///tmp/dylean/index.html',runScripts:'outside-only',pretendToBeVisual:true});
+  const v = offline.window;
+  v.URL.createObjectURL = () => 'blob:offline'; v.URL.revokeObjectURL = () => {};
+  v.matchMedia = () => ({matches:false});
+  try {
+    v.eval(fs.readFileSync(path.join(root, 'dist/data.js'), 'utf8'));
+    v.eval(fs.readFileSync(path.join(root, 'dist/app.js'), 'utf8'));
+    await wait();
+    const initial = v.location.hash;
+    v.document.querySelector('#code').scrollTop = 123;
+    v.document.querySelector('#code a.symbol-link').click(); await wait();
+    assert.ok(v.location.hash.includes('symbol='));
+    v.document.querySelector('#back').click(); await wait();
+    assert.equal(v.location.hash, initial);
+    assert.equal(v.document.querySelector('#code').scrollTop, 123);
+  } finally {v.close();}
+});
