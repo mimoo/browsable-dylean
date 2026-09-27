@@ -3,7 +3,9 @@
   "sourceHash": "ac35ed9f889f79efc89c10714fa10062f61edb5a4062c705951875315d69b7ed",
   "toolchain": "leanprover/lean4:v4.35.0-rc2",
   "files": 94,
-  "symbols": 2778,
-  "edges": 12493,
-  "references": 18589
+  "libraryFiles": 92,
+  "symbols": 13339,
+  "locals": 8862,
+  "edges": 16659,
+  "references": 70323
 }

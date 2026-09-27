@@ -22,7 +22,7 @@ test('definition links use compiler locations; Back and Forward restore source p
   await wait();
   const origin = w.location.hash;
   const trace = Object.values(D.symbols).find(s => s.name === 'DY.Trace');
-  const a = [...w.document.querySelectorAll('#code a.symbol-link')].find(a => JSON.parse(a.dataset.targets).includes(trace.id) && !a.classList.contains('definition'));
+  const a = [...w.document.querySelectorAll('#code a.symbol-link[data-targets]')].find(a => JSON.parse(a.dataset.targets).includes(trace.id) && !a.classList.contains('definition'));
   assert.ok(a);
   $('#code').scrollTop = 432;
   a.click(); await wait();
@@ -73,7 +73,7 @@ test('mobile views, source wrapping, search modes, and file imports are usable',
 });
 
 test('every file renders source text faithfully, including Unicode and nested comments', async () => {
-  for (const file of Object.values(D.files)) {
+  for (const file of Object.values(D.files).filter(f => !f.external)) {
     const a = w.document.createElement('a');
     a.href = '#' + new w.URLSearchParams({file:file.path,line:'1'});
     w.document.body.append(a); a.click(); a.remove();
@@ -106,10 +106,53 @@ test('standalone file:// export supports definition jumps and Back', async () =>
     await wait();
     const initial = v.location.hash;
     v.document.querySelector('#code').scrollTop = 123;
-    v.document.querySelector('#code a.symbol-link').click(); await wait();
+    v.document.querySelector('#code a.symbol-link[data-targets]').click(); await wait();
     assert.ok(v.location.hash.includes('symbol='));
     v.document.querySelector('#back').click(); await wait();
     assert.equal(v.location.hash, initial);
     assert.equal(v.document.querySelector('#code').scrollTop, 123);
   } finally {v.close();}
+});
+
+test('local variable references jump to their binder and show uses', async () => {
+  const local = Object.values(D.symbols).find(s => s.local && s.file === 'DY/Trace/Basic.lean' && s.name === 'tr' && s.uses.length > 2);
+  const a = w.document.createElement('a');
+  a.href = '#' + new w.URLSearchParams({file:local.file,line:'1'});
+  w.document.body.append(a); a.click(); a.remove(); await wait();
+  const use = [...w.document.querySelectorAll('#code a[data-targets]')].find(a => !a.classList.contains('definition') && JSON.parse(a.dataset.targets).includes(local.id));
+  assert.ok(use); use.click(); await wait();
+  assert.equal(new w.URLSearchParams(w.location.hash.slice(1)).get('symbol'), local.id);
+  assert.ok($('#L' + (local.range[0] + 1)).classList.contains('target'));
+  assert.equal($('.badge').textContent, 'local binding');
+  assert.equal($('[data-tab="references"]').getAttribute('aria-selected'), 'true');
+  assert.ok($('#inspect-content a'));
+});
+
+test('import links open modules, library definitions load on demand and Back restores the source', async () => {
+  const a = w.document.createElement('a');
+  a.href = '#' + new w.URLSearchParams({file:'DY/Trace/Basic.lean',line:'1'});
+  w.document.body.append(a); a.click(); a.remove(); await wait();
+  const imported = $('#code .module-link'); assert.ok(imported);
+  assert.equal(imported.textContent, 'DY.Trace.Grind');
+  const nat = Object.values(D.symbols).find(s => s.name === 'Nat');
+  assert.equal(D.files[nat.file].text, undefined);
+  const originalAppend = w.document.head.append.bind(w.document.head);
+  w.document.head.append = element => {
+    originalAppend(element);
+    if (element.tagName === 'SCRIPT') setTimeout(() => {
+      w.eval(fs.readFileSync(path.join(root, 'dist', element.getAttribute('src')), 'utf8'));
+      element.onload();
+    }, 0);
+  };
+  try {
+    $('#code').scrollTop = 789;
+    const use = [...w.document.querySelectorAll('#code a[data-targets]')].find(a => JSON.parse(a.dataset.targets).includes(nat.id));
+    assert.ok(use); use.click(); await wait();
+    assert.equal($('#filename').textContent, nat.file);
+    assert.equal($('.symbol-name').textContent, 'Nat');
+    assert.ok($('#code').textContent.includes('inductive Nat'));
+    $('#back').click(); await wait();
+    assert.equal($('#filename').textContent, 'DY/Trace/Basic.lean');
+    assert.equal($('#code').scrollTop, 789);
+  } finally {w.document.head.append = originalAppend;}
 });

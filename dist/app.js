@@ -8,6 +8,20 @@
   let current, selected, tab = 'callers', mode = 'symbols', rawURL, searchTimer;
   let historyIndex = history.state?.dyIndex || 0, historyMax = historyIndex;
   const codeCache = new Map();
+  const loadingFiles = new Map();
+  function ensureFile(file) {
+    if (typeof file.text === 'string') return Promise.resolve();
+    if (loadingFiles.has(file.path)) return loadingFiles.get(file.path);
+    const task = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = file.asset;
+      script.onload = () => {script.remove(); typeof file.text === 'string' ? resolve() : reject(new Error('Empty library source'));};
+      script.onerror = () => {script.remove(); reject(new Error('Library source could not be loaded'));};
+      document.head.append(script);
+    }).finally(() => loadingFiles.delete(file.path));
+    loadingFiles.set(file.path, task);
+    return task;
+  }
   function href(file, line = 1, symbol = '') {
     const q = new URLSearchParams({file, line: String(line)});
     if (symbol) q.set('symbol', symbol);
@@ -48,7 +62,7 @@
       if (!groups.has(group)) groups.set(group, []);
       groups.get(group).push(f);
     });
-    $('#file-list').innerHTML = [...groups].map(([group, list]) => `<details class="file-group" open><summary>${esc(group)} <small>(${list.length})</small></summary>${list.map(f => `<a class="item file-item ${f.path === current ? 'active' : ''}" ${f.path === current ? 'aria-current="page"' : ''} href="${esc(href(f.path))}">${esc(group === 'Repository' ? f.path : f.path.slice(group.length + 1))}</a>`).join('')}</details>`).join('') || '<p class="hint">No matching files.</p>';
+    $('#file-list').innerHTML = [...groups].map(([group, list]) => `<details class="file-group" ${group !== 'Library' || current?.startsWith('Library/') || q ? 'open' : ''}><summary>${esc(group)} <small>(${list.length})</small></summary>${list.map(f => `<a class="item file-item ${f.path === current ? 'active' : ''}" ${f.path === current ? 'aria-current="page"' : ''} href="${esc(href(f.path))}">${esc(group === 'Repository' ? f.path : f.path.slice(group.length + 1))}</a>`).join('')}</details>`).join('') || '<p class="hint">No matching files.</p>';
   }
   const keywords = new Set('module import public private protected meta noncomputable namespace end section variable universe open export def theorem lemma abbrev inductive structure class instance opaque axiom where deriving by do let have show from exact apply intro intros cases induction match with if then else return fun for in unless try catch simp grind constructor repeat sorry set_option syntax macro macro_rules elab example attribute local extends mutual partial termination_by decreasing_by'.split(' '));
   function lexicalRanges(text) {
@@ -99,6 +113,14 @@
         if (b > a) refs[l].push([a, b, r[4], r[5]]);
       }
     }
+    lines.forEach((line, l) => {
+      const prefix = line.match(/^\s*(?:(?:public|private|meta|all)\s+)*import\s+/);
+      if (!prefix) return;
+      const tail = line.slice(prefix[0].length).split('--')[0];
+      for (const match of tail.matchAll(/[A-Za-z_][A-Za-z0-9_'.]*/g)) {
+        if (D.modules[match[0]]) refs[l].push([prefix[0].length + match.index, prefix[0].length + match.index + match[0].length, '@module:' + D.modules[match[0]], false]);
+      }
+    });
     const html = lines.map((line, l) => {
       const boundaries = [...new Set([0, line.length, ...syntax[l].flatMap(r => r.slice(0, 2)), ...refs[l].flatMap(r => r.slice(0, 2))])].sort((a, b) => a - b);
       let content = '';
@@ -111,6 +133,11 @@
         if (matches.length) {
           const shortest = matches[0][1] - matches[0][0];
           const ids = [...new Set(matches.filter(r => r[1] - r[0] === shortest).map(r => r[2]))];
+          if (ids[0].startsWith('@module:')) {
+            const path = ids[0].slice(8);
+            content += `<a class="symbol-link module-link" href="${esc(href(path))}" title="Open module ${esc(path)}">${value}</a>`;
+            continue;
+          }
           const symbol = D.symbols[ids[0]];
           value = `<a class="symbol-link ${matches[0][3] ? 'definition' : ''}" href="${esc(symbolHref(ids[0]))}" data-targets="${esc(JSON.stringify(ids))}" title="${esc(symbol.name)} · ${esc(symbol.kind)} · ${esc(symbol.file)}:${symbol.range[0] + 1}">${value}</a>`;
         }
@@ -124,25 +151,45 @@
     return html;
   }
   function inferSymbol(file, line) {
-    return file.symbols.filter(id => {const s = D.symbols[id]; return s.span[0] <= line && s.span[2] >= line;})
+    return file.symbols.filter(id => !D.symbols[id].local).filter(id => {const s = D.symbols[id]; return s.span[0] <= line && s.span[2] >= line;})
       .sort((a, b) => (D.symbols[a].span[2] - D.symbols[a].span[0]) - (D.symbols[b].span[2] - D.symbols[b].span[0]))[0];
   }
   function renderRoute(restore) {
+    historyIndex = history.state?.dyIndex || 0;
+    $('#back').disabled = historyIndex <= 0;
+    $('#forward').disabled = historyIndex >= historyMax;
     const q = new URLSearchParams(location.hash.slice(1));
     const requested = q.get('file');
     const file = D.files[requested] || D.files['DY/Trace/Basic.lean'] || files[0];
+    if (typeof file.text !== 'string') {
+      const requestedHash = location.hash;
+      current = null;
+      selected = undefined;
+      $('#file-meta').textContent = 'Library source';
+      $('#download').removeAttribute('href');
+      renderInspector();
+      $('#filename').textContent = file.path;
+      $('#module-name').textContent = file.module;
+      $('#code').innerHTML = '<p class="hint loading-source" role="status">Loading library source…</p>';
+      setView('code');
+      ensureFile(file).then(() => {if (location.hash === requestedHash) renderRoute(restore);}).catch(() => {
+        if (location.hash === requestedHash) $('#code').innerHTML = '<p class="hint loading-source">Unable to load this library file. <button id="retry-source">Retry</button></p>';
+      });
+      return;
+    }
     const line = Math.max(1, Math.min(file.text.split('\n').length, Number(q.get('line')) || 1));
     selected = D.symbols[q.get('symbol')]?.file === file.path ? q.get('symbol') : inferSymbol(file, line - 1);
+    if (selected && D.symbols[selected].local) tab = 'references';
     if (current !== file.path) {
       current = file.path;
       $('#module-name').textContent = file.module;
       $('#filename').textContent = file.path;
-      $('#file-meta').textContent = `${file.text.split('\n').length.toLocaleString()} lines · ${file.symbols.length} symbols`;
+      $('#file-meta').textContent = `${file.text.split('\n').length.toLocaleString()} lines · ${file.symbols.filter(id => !D.symbols[id].local).length} declarations`;
       $('#code').innerHTML = renderSource(file);
       if (rawURL) URL.revokeObjectURL(rawURL);
       rawURL = URL.createObjectURL(new Blob([file.text], {type:'text/plain;charset=utf-8'}));
       $('#download').href = rawURL; $('#download').download = file.path.split('/').pop();
-      $('#outline').innerHTML = file.symbols.filter(id => !D.symbols[id].generated).map(id => `<a class="item outline-item" href="${esc(symbolHref(id))}">${esc(D.symbols[id].name)}<small>${esc(D.symbols[id].kind)} · L${D.symbols[id].range[0] + 1}</small></a>`).join('') || '<p class="hint">No declarations in this file.</p>';
+      $('#outline').innerHTML = file.symbols.filter(id => !D.symbols[id].generated && !D.symbols[id].local).map(id => `<a class="item outline-item" href="${esc(symbolHref(id))}">${esc(D.symbols[id].name)}<small>${esc(D.symbols[id].kind)} · L${D.symbols[id].range[0] + 1}</small></a>`).join('') || '<p class="hint">No declarations in this file.</p>';
       renderFiles();
     }
     $$('.line.target').forEach(el => el.classList.remove('target'));
@@ -167,6 +214,11 @@
     }).join('')}</ul>`;
   }
   function renderInspector() {
+    if (!D.files[current]) {
+      $('#symbol-heading').textContent = 'Loading source…';
+      $('#inspect-content').textContent = 'Symbol details will appear when the source loads.';
+      return;
+    }
     const s = D.symbols[selected];
     $('#symbol-heading').innerHTML = s ? `<span class="badge">${esc(s.kind)}</span><h2 class="symbol-name">${esc(s.name)}</h2><div class="symbol-location"><a href="${esc(symbolHref(selected))}">${esc(s.file)}:${s.range[0] + 1}</a><br>${s.uses.length} references · ${s.callers.length} callers</div>` : '<h2 class="symbol-name">Explore this file</h2><p class="hint">Tap a symbol in the code or choose one from the file outline.</p>';
     $$('.inspect-tabs button').forEach(b => {b.setAttribute('aria-selected', b.dataset.tab === tab); b.tabIndex = b.dataset.tab === tab ? 0 : -1;});
@@ -177,7 +229,7 @@
       pane.innerHTML = `<p class="section-label">IMPORTS · ${f.imports.length}</p>${f.imports.map(moduleLink).join('') || '<p class="hint">No direct imports.</p>'}<p class="section-label">IMPORTED BY · ${importedBy.length}</p>${importedBy.map(x => moduleLink(x.module)).join('') || '<p class="hint">No importing modules in this repository.</p>'}`;
     } else if (!s) pane.innerHTML = '<p class="hint">Select a declaration to see its dependencies. The Imports tab is available for every file.</p>';
     else if (tab === 'references') {
-      pane.innerHTML = `<p class="hint">${s.uses.length} resolved source references</p>` + (s.uses.map(([path, line, , , , owner]) => `<a class="item" href="${esc(href(path, line + 1, owner || ''))}">${esc(path)}:${line + 1}<small>${esc(owner ? D.symbols[owner].name : 'Module-level reference')}</small><span class="ref-code">${esc(D.files[path].text.split('\n')[line].trim())}</span></a>`).join('') || '<p class="hint">No recorded references in this repository.</p>');
+      pane.innerHTML = `<p class="hint">${s.uses.length} resolved source references</p>` + (s.uses.map(([path, line, , , , owner]) => `<a class="item" href="${esc(href(path, line + 1, owner || ''))}">${esc(path)}:${line + 1}<small>${esc(owner ? D.symbols[owner].name : 'Module-level reference')}</small><span class="ref-code">${esc(D.files[path].text?.split('\n')[line]?.trim() || 'Open reference in library source')}</span></a>`).join('') || '<p class="hint">No recorded references in this repository.</p>');
     } else {
       pane.innerHTML = `<p class="hint">${tab === 'callers' ? 'Declarations that use this symbol.' : 'Symbols used by this declaration.'} Includes types and proofs. Expand branches to explore.</p>` + (s[tab].length ? treeRows(s[tab], [selected]) : `<p class="hint">No recorded ${tab} in this repository.</p>`);
     }
@@ -188,22 +240,23 @@
     let results = [], total = 0;
     const matches = str => tokens.every(t => str.toLowerCase().includes(t));
     if (mode === 'symbols') {
-      const found = symbols.filter(s => !s.generated && matches(s.name + ' ' + s.file)).sort((a, b) => Number(b.name.toLowerCase().endsWith(q)) - Number(a.name.toLowerCase().endsWith(q)) || a.name.localeCompare(b.name));
+      const found = symbols.filter(s => !s.generated && !s.local && matches(s.name + ' ' + s.file)).sort((a, b) => Number(b.name.toLowerCase().endsWith(q)) - Number(a.name.toLowerCase().endsWith(q)) || a.name.localeCompare(b.name));
       total = found.length;
       results = found.slice(0, 100).map(s => link(s.id, `<small>${esc(s.kind)} · ${esc(s.file)}:${s.range[0] + 1}</small>`));
     } else if (mode === 'files') {
       const found = files.filter(f => matches(f.path)); total = found.length;
       results = found.slice(0, 100).map(f => `<a class="item" href="${esc(href(f.path))}">${esc(f.path)}<small>${esc(f.module)}</small></a>`);
     } else if (q) {
-      for (const f of files) f.text.split('\n').forEach((text, i) => {
+      for (const f of files.filter(f => !f.external)) f.text.split('\n').forEach((text, i) => {
         if (matches(text)) {total++; if (results.length < 100) results.push(`<a class="item" href="${esc(href(f.path, i + 1))}">${esc(f.path)}:${i + 1}<span class="ref-code">${esc(text.trim())}</span></a>`);}
       });
     }
-    $('#search-results').innerHTML = `<div class="result-count">${total.toLocaleString()} results${total > 100 ? ' · showing first 100; refine your search' : ''}</div>` + results.join('') + (!total ? `<p class="hint">${mode === 'text' && !q ? 'Enter source text to search.' : 'No matches. Try a shorter query or another scope.'}</p>` : '');
+    $('#search-results').innerHTML = `<div class="result-count">${total.toLocaleString()} results${total > 100 ? ' · showing first 100; refine your search' : ''}</div>` + results.join('') + (!total ? `<p class="hint">${mode === 'text' && !q ? 'Enter source text to search the repository.' : 'No matches. Try a shorter query or another scope.'}</p>` : '');
   }
   function openSearch() {$('#search-dialog').showModal(); search(); $('#search-input').focus();}
   function toast(text) {$('#toast').textContent = text; $('#toast').style.display = 'block'; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('#toast').style.display = 'none', 2500);}
   document.addEventListener('click', e => {
+    if (e.target.closest('#retry-source')) {renderRoute(false); return;}
     const a = e.target.closest('a[href^="#"]');
     if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0 || a.classList.contains('skip')) return;
     e.preventDefault();
@@ -249,7 +302,7 @@
   document.addEventListener('keydown', e => {
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.target.matches('input,textarea,[contenteditable]') && !$('dialog[open]')) {e.preventDefault(); openSearch();}
   });
-  $('#file-count').textContent = D.meta.files;
+  $('#file-count').textContent = D.meta.files + ' + library';
   $('#repo-info').textContent = `${D.meta.symbols.toLocaleString()} symbols · ${D.meta.references.toLocaleString()} references · ${D.meta.revision || 'working tree'}`;
   if (!location.hash) updateHistory({dyIndex: 0}, href('DY/Trace/Basic.lean'), true);
   renderRoute(true);
