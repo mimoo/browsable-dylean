@@ -1,0 +1,14 @@
+{
+  "name": "browsable-dylean",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "python3 scripts/build.py",
+    "build:cached": "python3 scripts/build.py --skip-lean",
+    "preview": "python3 -m http.server 4173 --directory dist",
+    "test": "python3 -m unittest discover -s tests -v && node --check web/app.js && node --test tests/navigation.test.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
